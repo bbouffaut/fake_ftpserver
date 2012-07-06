@@ -2,8 +2,11 @@
 # coding: utf-8
 
 import os,socket,threading,time
-import traceback
+#import traceback
 
+allow_delete = False
+local_ip = socket.gethostbyname(socket.gethostname())
+local_port = 8888
 currdir=os.path.abspath('.')
 
 class FTPserverThread(threading.Thread):
@@ -13,6 +16,7 @@ class FTPserverThread(threading.Thread):
         self.basewd=currdir
         self.cwd=self.basewd
         self.rest=False
+        self.pasv_mode=False
         threading.Thread.__init__(self)
 
     def run(self):
@@ -34,6 +38,7 @@ class FTPserverThread(threading.Thread):
         self.conn.send('331 OK.\r\n')
     def PASS(self,cmd):
         self.conn.send('230 OK.\r\n')
+        #self.conn.send('530 Incorrect.\r\n')
     def QUIT(self,cmd):
         self.conn.send('221 Goodbye.\r\n')
     def NOOP(self,cmd):
@@ -65,20 +70,46 @@ class FTPserverThread(threading.Thread):
         self.conn.send('250 OK.\r\n')
 
     def PORT(self,cmd):
+        if self.pasv_mode:
+            self.servsock.close()
+            self.pasv_mode = False
         l=cmd[5:].split(',')
         self.dataAddr='.'.join(l[:4])
         self.dataPort=(int(l[4])<<8)+int(l[5])
         self.conn.send('200 Get port.\r\n')
 
+    def PASV(self,cmd): # from http://goo.gl/3if2U
+        self.pasv_mode = True
+        self.servsock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        self.servsock.bind((local_ip,0))
+        self.servsock.listen(1)
+        ip, port = self.servsock.getsockname()
+        print 'open', ip, port
+        self.conn.send('227 Entering Passive Mode (%s,%u,%u).\r\n' %
+                ('.'.join(ip.split(',')), port>>8&0xFF, port&0xFF))
+
+    def start_datasock(self):
+        if self.pasv_mode:
+            self.datasock, addr = self.servsock.accept()
+            print 'connect:', addr
+        else:
+            self.datasock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+            self.datasock.connect((self.dataAddr,self.dataPort))
+
+    def stop_datasock(self):
+        self.datasock.close()
+        if self.pasv_mode:
+            self.servsock.close()
+
+
     def LIST(self,cmd):
         self.conn.send('150 Here comes the directory listing.\r\n')
-        self.datasock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-        self.datasock.connect((self.dataAddr,self.dataPort))
-        print self.cwd
+        print 'list:', self.cwd
+        self.start_datasock()
         for t in os.listdir(self.cwd):
             k=self.toListItem(os.path.join(self.cwd,t))
             self.datasock.send(k+'\r\n')
-        self.datasock.close()
+        self.stop_datasock()
         self.conn.send('226 Directory send OK.\r\n')
 
     def toListItem(self,fn):
@@ -98,13 +129,19 @@ class FTPserverThread(threading.Thread):
 
     def RMD(self,cmd):
         dn=os.path.join(self.cwd,cmd[4:-2])
-        #os.rmdir(dn)
-        self.conn.send('250 Directory deleted.\r\n')
+        if allow_delete:
+            os.rmdir(dn)
+            self.conn.send('250 Directory deleted.\r\n')
+        else:
+            self.conn.send('450 Not allowed.\r\n')
 
     def DELE(self,cmd):
         fn=os.path.join(self.cwd,cmd[5:-2])
-        #os.remove(fn)
-        self.conn.send('250 File deleted.\r\n')
+        if allow_delete:
+            os.remove(fn)
+            self.conn.send('250 File deleted.\r\n')
+        else:
+            self.conn.send('450 Not allowed.\r\n')
 
     def RNFR(self,cmd):
         self.rnfn=os.path.join(self.cwd,cmd[5:-2])
@@ -128,17 +165,16 @@ class FTPserverThread(threading.Thread):
         else:
             fi=open(fn,'r')
         self.conn.send('150 Opening data connection.\r\n')
-        self.datasock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-        self.datasock.connect((self.dataAddr,self.dataPort))
         if self.rest:
             fi.seek(self.pos)
             self.rest=False
         data= fi.read(1024)
+        self.start_datasock()
         while data:
             self.datasock.send(data)
             data=fi.read(1024)
         fi.close()
-        self.datasock.close()
+        self.stop_datasock()
         self.conn.send('226 Transfer complete.\r\n')
 
     def STOR(self,cmd):
@@ -149,20 +185,19 @@ class FTPserverThread(threading.Thread):
         else:
             fo=open(fn,'w')
         self.conn.send('150 Opening data connection.\r\n')
-        self.datasock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-        self.datasock.connect((self.dataAddr,self.dataPort))
+        self.start_datasock()
         while True:
             data=self.datasock.recv(1024)
             if not data: break
             fo.write(data)
         fo.close()
-        self.datasock.close()
+        self.stop_datasock()
         self.conn.send('226 Transfer complete.\r\n')
 
 class FTPserver(threading.Thread):
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(('',8888))
+        self.sock.bind((local_ip,local_port))
         threading.Thread.__init__(self)
 
     def run(self):
