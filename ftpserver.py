@@ -34,6 +34,13 @@ class FTPserverThread(threading.Thread):
                     #traceback.print_exc()
                     self.conn.send('500 Sorry.\r\n')
 
+    def SYST(self,cmd):
+        self.conn.send('215 UNIX Type: L8\r\n')
+    def OPTS(self,cmd):
+        if cmd[5:-2].upper()=='UTF8 ON':
+            self.conn.send('200 OK.\r\n')
+        else:
+            self.conn.send('451 Sorry.\r\n')
     def USER(self,cmd):
         self.conn.send('331 OK.\r\n')
     def PASS(self,cmd):
@@ -86,7 +93,7 @@ class FTPserverThread(threading.Thread):
         ip, port = self.servsock.getsockname()
         print 'open', ip, port
         self.conn.send('227 Entering Passive Mode (%s,%u,%u).\r\n' %
-                ('.'.join(ip.split(',')), port>>8&0xFF, port&0xFF))
+                (','.join(ip.split('.')), port>>8&0xFF, port&0xFF))
 
     def start_datasock(self):
         if self.pasv_mode:
@@ -159,6 +166,7 @@ class FTPserverThread(threading.Thread):
 
     def RETR(self,cmd):
         fn=os.path.join(self.cwd,cmd[5:-2])
+        #fn=os.path.join(self.cwd,cmd[5:-2]).lstrip('/')
         print 'Downlowding:',fn
         if self.mode=='I':
             fi=open(fn,'rb')
@@ -214,5 +222,6 @@ if __name__=='__main__':
     ftp=FTPserver()
     ftp.daemon=True
     ftp.start()
+    print 'On', local_ip, ':', local_port
     raw_input('Enter to end...\n')
     ftp.stop()
