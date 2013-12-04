@@ -15,57 +15,67 @@ class FTPserverThread(threading.Thread):
         self.cwd = self.basewd
         self.rest = False
         self.pasv_mode = False
-        self.pos = self.rnfn = self.datasock = self.servsock = self.data_addr = self.data_port = self.mode = None
+        self.pos = self.rnfn = self.datasock = self.servsock = self.data_addr = \
+            self.data_port = self.mode = None
         threading.Thread.__init__(self)
 
     @property
     def basewd(self):
         return self.server.ftp_path
 
+    def _send(self, data):
+        self._log('<-  ' + data + '\n')
+        self.conn.send(data + '\r\n')
+
+    def _log(self, s, *args):
+        print '[%s:%s]  %s' % (self.addr[0], self.addr[1], s % args)
+
     def run(self):
-        self.conn.send('220 Welcome!\r\n')
+        self._send('220 Welcome!')
         while True:
             cmd = self.conn.recv(256)
+            # TODO: clean characters
             if not cmd:
                 break
             else:
-                print 'Recieved:', cmd
+                self._log('->  ' + cmd.strip())
                 try:
-                    func = getattr(self, cmd[:4].strip().upper())
+                    func = getattr(self, cmd[:4].strip().upper(), self._502)
                     func(cmd)
                 except Exception:
                     traceback.print_exc()
-                    self.conn.send('500 Sorry.\r\n')
+                    self._send('500 Sorry.')
  
     def SYST(self, cmd):
-        self.conn.send('215 UNIX Type: L8\r\n')
+        self._send('215 UNIX Type: L8')
 
     def OPTS(self, cmd):
         if cmd[5:-2].upper() == 'UTF8 ON':
-            self.conn.send('200 OK.\r\n')
+            self._send('200 OK.')
         else:
-            self.conn.send('451 Sorry.\r\n')
+            self._send('451 Sorry.')
 
     def USER(self, cmd):
-        self.conn.send('331 OK.\r\n')
+        self._send('331 OK.')
 
     def PASS(self, cmd):
-        self.conn.send('230 OK.\r\n')  # self.conn.send('530 Incorrect.\r\n')
+        self._send('230 OK.')
+        # self._send('530 Incorrect.')
 
     def QUIT(self, cmd):
-        self.conn.send('221 Goodbye.\r\n')
+        self._send('221 Goodbye.')
 
     def NOOP(self, cmd):
-        self.conn.send('200 OK.\r\n')
+        self._send('200 OK.')
 
     def TYPE(self, cmd):
         self.mode = cmd[5]
-        self.conn.send('200 Binary mode.\r\n')
+        self._send('200 Binary mode.')
  
     def CDUP(self, cmd):
         if not os.path.samefile(self.cwd, self.basewd):
             self.cwd = os.path.abspath(os.path.join(self.cwd, '..'))
-        self.conn.send('200 OK.\r\n')
+        self._send('200 OK.')
 
     def PWD(self, cmd):
         cwd = os.path.relpath(self.cwd, self.basewd)
@@ -73,7 +83,7 @@ class FTPserverThread(threading.Thread):
             cwd = '/'
         else:
             cwd = '/' + cwd
-        self.conn.send('257 \"%s\"\r\n' % cwd)
+        self._send('257 "%s"' % cwd)
 
     def CWD(self, cmd):
         chwd = cmd[4:-2]
@@ -83,7 +93,7 @@ class FTPserverThread(threading.Thread):
             self.cwd = os.path.join(self.basewd, chwd[1:])
         else:
             self.cwd = os.path.join(self.cwd, chwd)
-        self.conn.send('250 OK.\r\n')
+        self._send('250 OK.')
  
     def PORT(self, cmd):
         if self.pasv_mode:
@@ -92,7 +102,7 @@ class FTPserverThread(threading.Thread):
         l = cmd[5:].split(',')
         self.data_addr = '.'.join(l[:4])
         self.data_port = (int(l[4]) << 8) + int(l[5])
-        self.conn.send('200 Get port.\r\n')
+        self._send('200 Get port.')
  
     def PASV(self, cmd):  # from http://goo.gl/3if2U
         self.pasv_mode = True
@@ -101,8 +111,11 @@ class FTPserverThread(threading.Thread):
         self.servsock.listen(1)
         ip, port = self.servsock.getsockname()
         print 'open', ip, port
-        self.conn.send('227 Entering Passive Mode (%s,%u,%u).\r\n' % (','.join(ip.split('.')), port >> 8 & 0xFF,
-                                                                      port & 0xFF))
+        self._send('227 Entering Passive Mode (%s,%u,%u).' % (
+            ','.join(ip.split('.')),
+            port >> 8 & 0xFF,
+            port & 0xFF,
+        ))
  
     def start_datasock(self):
         if self.pasv_mode:
@@ -118,14 +131,14 @@ class FTPserverThread(threading.Thread):
             self.servsock.close()
 
     def LIST(self, cmd):
-        self.conn.send('150 Here comes the directory listing.\r\n')
+        self._send('150 Here comes the directory listing.')
         print 'list:', self.cwd
         self.start_datasock()
         for t in os.listdir(self.cwd):
             k = self._list_item(os.path.join(self.cwd, t))
             self.datasock.send(k + '\r\n')
         self.stop_datasock()
-        self.conn.send('226 Directory send OK.\r\n')
+        self._send('226 Directory send OK.')
  
     def _list_item(self, fn):
         st = os.stat(fn)
@@ -140,37 +153,37 @@ class FTPserverThread(threading.Thread):
     def MKD(self, cmd):
         dn = os.path.join(self.cwd, cmd[4:-2])
         os.mkdir(dn)
-        self.conn.send('257 Directory created.\r\n')
+        self._send('257 Directory created.')
  
     def RMD(self, cmd):
         dn = os.path.join(self.cwd, cmd[4:-2])
         if self.server.can_delete:
             os.rmdir(dn)
-            self.conn.send('250 Directory deleted.\r\n')
+            self._send('250 Directory deleted.')
         else:
-            self.conn.send('450 Not allowed.\r\n')
+            self._send('450 Not allowed.')
  
     def DELE(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
         if self.server.can_delete:
             os.remove(fn)
-            self.conn.send('250 File deleted.\r\n')
+            self._send('250 File deleted.')
         else:
-            self.conn.send('450 Not allowed.\r\n')
+            self._send('450 Not allowed.')
  
     def RNFR(self, cmd):
         self.rnfn = os.path.join(self.cwd, cmd[5:-2])
-        self.conn.send('350 Ready.\r\n')
+        self._send('350 Ready.')
  
     def RNTO(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
         os.rename(self.rnfn, fn)
-        self.conn.send('250 File renamed.\r\n')
+        self._send('250 File renamed.')
  
     def REST(self, cmd):
         self.pos = int(cmd[5:-2])
         self.rest = True
-        self.conn.send('250 File position reseted.\r\n')
+        self._send('250 File position reseted.')
  
     def RETR(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
@@ -180,7 +193,7 @@ class FTPserverThread(threading.Thread):
             fi = open(fn, 'rb')
         else:
             fi = open(fn, 'r')
-        self.conn.send('150 Opening data connection.\r\n')
+        self._send('150 Opening data connection.')
         if self.rest:
             fi.seek(self.pos)
             self.rest = False
@@ -191,7 +204,7 @@ class FTPserverThread(threading.Thread):
             data = fi.read(1024)
         fi.close()
         self.stop_datasock()
-        self.conn.send('226 Transfer complete.\r\n')
+        self._send('226 Transfer complete.')
  
     def STOR(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
@@ -200,7 +213,7 @@ class FTPserverThread(threading.Thread):
             fo = open(fn, 'wb')
         else:
             fo = open(fn, 'w')
-        self.conn.send('150 Opening data connection.\r\n')
+        self._send('150 Opening data connection.')
         self.start_datasock()
         while True:
             data = self.datasock.recv(1024)
@@ -209,11 +222,14 @@ class FTPserverThread(threading.Thread):
             fo.write(data)
         fo.close()
         self.stop_datasock()
-        self.conn.send('226 Transfer complete.\r\n')
+        self._send('226 Transfer complete.')
 
     def SIZE(self, cmd):
-        self.conn.send('213 0\r\n')
-        #self.conn.send('200 OK.\r\n')
+        self._send('213 0')
+        #self._send('200 OK.')
+
+    def _502(self, *args):
+        return self._send('502 Command not implemented.')
 
 
 class FTPserver(threading.Thread):
@@ -242,16 +258,16 @@ class FTPserver(threading.Thread):
 
 if __name__ == '__main__':
     import sys
-    ip = '127.0.0.1'
-    port = 2121
+    server_ip = '127.0.0.1'
+    server_port = 2121
     if len(sys.argv) > 1:
         if '.' in sys.argv[1]:
-            ip = sys.argv[1]
+            server_ip = sys.argv[1]
         else:
-            port = int(sys.argv[1])
+            server_port = int(sys.argv[1])
     if len(sys.argv) > 2:
-        port = int(sys.argv[2])
-    ftp = FTPserver(ip=ip, port=port)
+        server_port = int(sys.argv[2])
+    ftp = FTPserver(ip=server_ip, port=server_port)
     ftp.daemon = True
     try:
         ftp.start()
