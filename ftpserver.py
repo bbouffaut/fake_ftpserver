@@ -14,32 +14,31 @@ def make_path(*parts):
     return path
 
 
-api_host = 'http://0.0.0.0:8000'
+API_HOST = 'http://0.0.0.0:8000'
 
 
-def get_session():
-    s = requests.Session()
-    s.get(api_host + '/account/login')
-    return s
+class Client(object):
 
+    def __init__(self):
+        self.session = requests.Session()
+        self.username = self.remote_session_id = None
 
-def check_user_password(user, password):
-    print 'Check ' + user
-    s = get_session()
-    r = s.post(api_host + '/account/login', allow_redirects=False, data={
-        'username': user, 'password': password, 'csrfmiddlewaretoken': s.cookies['csrftoken']})
-    return bool(r.cookies.get('sessionid'))
+    def csrftoken(self, refresh=True):
+        if refresh:
+            self.session.get(API_HOST + '/account/login')
+        return self.session.cookies['csrftoken']
 
+    def login(self, username, password, ip):
+        r = self.session.post(API_HOST + '/account/login', allow_redirects=False, data={
+            'username': username, 'password': password, 'csrfmiddlewaretoken': self.csrftoken()})
+        self.remote_session_id = r.cookies.get('sessionid')
+        self.username = username
+        return bool(self.remote_session_id)
 
-def upload(user, file_name, file_obj):
-    s = get_session()
-    r = s.post(api_host + '/api/ftp', data={'user': user, 'csrfmiddlewaretoken': s.cookies['csrftoken']},
-               files={file_name: file_obj})
-    return r.content == 'OK'
-
-
-class FtpThreadClosed(Exception):
-    pass
+    def upload(self, file_name, file_obj):
+        r = self.session.post(API_HOST + '/api/ftp', data={'csrfmiddlewaretoken': self.csrftoken()},
+                              files={file_name: file_obj})
+        return r.content == 'OK'
 
 
 class BaseFtpThread(threading.Thread):
@@ -104,9 +103,6 @@ class BaseFtpThread(threading.Thread):
                         self._send('530 Not logged in.')
                     else:
                         getattr(self, c)(cmd)
-                except FtpThreadClosed as e:
-                    self._send('221 ' + (e.message or 'Goodbye.'))
-                    #break
                 except Exception:
                     traceback.print_exc()
                     self._send('500 Error.')
@@ -123,8 +119,8 @@ class BaseFtpThread(threading.Thread):
             self._log('Open given socket %s:%s', self.data_addr, self.data_port)
 
     def stop_datasock(self):
-        self._log('Close socket %s:%s', *self.datasock.getsockname())
         if self.datasock:
+            self._log('Close socket %s:%s', *self.datasock.getsockname())
             self.datasock.close()
         if self.pasv_mode:
             try:
@@ -156,7 +152,7 @@ class FtpThread(BaseFtpThread):
         # self._send('530 Incorrect.')
 
     def QUIT(self, cmd):
-        raise FtpThreadClosed
+        self._send('221 Goodbye.')
 
     def NOOP(self, cmd):
         self._send('200 OK.')
@@ -318,13 +314,15 @@ class FtpThread(BaseFtpThread):
 
 class LimitedFtpThread(FtpThread):
     _status = None
+    _client = None
 
     def _command_allowed(self, cmd):
         return cmd not in 'cdup mkd rmd dele rnfr rnto'.upper().split()
 
     def PASS(self, cmd):
-        if check_user_password(user=self._user, password=cmd[5:].strip()):
-            self._authorized = True
+        self._client = Client()
+        self._authorized = self._client.login(username=self._user, password=cmd[5:].strip(), ip=self.addr[0])
+        if self._authorized:
             self._send('230 OK.')
         else:
             self._send('530 Incorrect.')
@@ -378,13 +376,13 @@ class LimitedFtpThread(FtpThread):
         self.stop_datasock()
         t.flush()
         t.seek(0)
-        success = upload(user=self._user, file_name=cmd[5:].strip(), file_obj=t)
+        success = self._client.upload(file_name=cmd[5:].strip(), file_obj=t)
         t.close()
         self._status = ('error', 'no luck')
         if success:
-            self._send('226 Transfer complete.')
+            self._send('226 SUCCESS.')
         else:
-            self._send('500 Transfer failed.')
+            self._send('226 ERROR.')
 
 
 class FTPserver(threading.Thread):
