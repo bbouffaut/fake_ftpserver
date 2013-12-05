@@ -14,25 +14,28 @@ def make_path(*parts):
     return path
 
 
-class Client(object):
-    host = 'http://0.0.0.0:8000'
+api_host = 'http://0.0.0.0:8000'
 
-    def check_user_password(self, user, password):
-        print 'Check ' + user
-        s = requests.Session()
-        r = s.get(self.host + '/account/login')
-        c = r.cookies['csrftoken']
-        r = s.post(self.host + '/account/login', allow_redirects=False,
-                   data={'username': user, 'password': password, 'csrfmiddlewaretoken': c})
-        return r.cookies.get('sessionid') and True
 
-    def get_log(self, user):
-        r = requests.post(self.host + '/get-log', data={'user': user})
-        return r.content
+def get_session():
+    s = requests.Session()
+    s.get(api_host + '/account/login')
+    return s
 
-    def upload(self, user, data):
-        r = requests.post(self.host + '/prices', data={'user': user, 'data': data})
-        return r.content == 'OK'
+
+def check_user_password(user, password):
+    print 'Check ' + user
+    s = get_session()
+    r = s.post(api_host + '/account/login', allow_redirects=False, data={
+        'username': user, 'password': password, 'csrfmiddlewaretoken': s.cookies['csrftoken']})
+    return bool(r.cookies.get('sessionid'))
+
+
+def upload(user, file_name, file_obj):
+    s = get_session()
+    r = s.post(api_host + '/api/ftp', data={'user': user, 'csrfmiddlewaretoken': s.cookies['csrftoken']},
+               files={file_name: file_obj})
+    return r.content == 'OK'
 
 
 class FtpThreadClosed(Exception):
@@ -103,7 +106,7 @@ class BaseFtpThread(threading.Thread):
                         getattr(self, c)(cmd)
                 except FtpThreadClosed as e:
                     self._send('221 ' + (e.message or 'Goodbye.'))
-                    break
+                    #break
                 except Exception:
                     traceback.print_exc()
                     self._send('500 Error.')
@@ -159,10 +162,14 @@ class FtpThread(BaseFtpThread):
         self._send('200 OK.')
 
     def TYPE(self, cmd):
-        if cmd[5] == 'I':
-            self._send('200 Binary mode.')
+        if cmd[5] in ['I', 'A']:
+            self.mode = cmd[5]
+            if self.mode == 'I':
+                self._send('200 Binary mode.')
+            else:
+                self._send('200 ASCII mode.')
         else:
-            self._send('500 Sorry, only binary mode supported.')
+            self._send('500 Sorry, only binary and ASCII type supported.')
 
     def CDUP(self, cmd):
         if not os.path.samefile(self.cwd, self.home_dir):
@@ -194,6 +201,7 @@ class FtpThread(BaseFtpThread):
         l = cmd[5:].split(',')
         self.data_addr = '.'.join(l[:4])
         self.data_port = (int(l[4]) << 8) + int(l[5])
+        self._log('Custom addr and port %s:%s', self.data_addr, self.data_port)
         self._send('200 Get port.')
 
     def PASV(self, cmd):  # from http://goo.gl/3if2U
@@ -268,8 +276,7 @@ class FtpThread(BaseFtpThread):
  
     def RETR(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
-        #fn=os.path.join(self.cwd,cmd[5:-2]).lstrip('/')
-        print 'Download:', fn
+        self._log('Download: ' + fn)
         if self.mode == 'I':
             fi = open(fn, 'rb')
         else:
@@ -289,7 +296,7 @@ class FtpThread(BaseFtpThread):
  
     def STOR(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
-        print 'Upload:', fn
+        self._log('Upload: ' + fn)
         if self.mode == 'I':
             fo = open(fn, 'wb')
         else:
@@ -310,9 +317,13 @@ class FtpThread(BaseFtpThread):
 
 
 class LimitedFtpThread(FtpThread):
+    _status = None
+
+    def _command_allowed(self, cmd):
+        return cmd not in 'cdup mkd rmd dele rnfr rnto'.upper().split()
 
     def PASS(self, cmd):
-        if Client().check_user_password(user=self._user, password=cmd[5:].strip()):
+        if check_user_password(user=self._user, password=cmd[5:].strip()):
             self._authorized = True
             self._send('230 OK.')
         else:
@@ -322,14 +333,16 @@ class LimitedFtpThread(FtpThread):
         self._send('257 "/"')
 
     def LIST(self, cmd):
-        self._send('150 Only log available.')
+        self._send('150 You can only see a status file after upload.')
         self.start_datasock()
-        self._send('-rw-r--r-- 1 %s ftp 111 Dec 02 22:16 log.txt' % self._user, channel='data')
+        #self._send('drw-r--r-- 1 %s ftp 111 Dec 02 22:16 .' % self._user, channel='data')
+        # if self._status:
+        #     self._send('-rw-r--r-- 1 %s ftp 111 Jan 01 00:00 %s.txt' % (self._user, self._status[0]), channel='data')
         self.stop_datasock()
         self._send('226 Directory send OK.')
 
     def SIZE(self, cmd):
-        if cmd[5:].strip() == '/log.txt':
+        if cmd[5:].strip() in ['/success.txt', '/error.txt']:
             self._send('213 2048')
         else:
             self._send('550 File unavailable.')
@@ -351,15 +364,27 @@ class LimitedFtpThread(FtpThread):
 
     def STOR(self, cmd):
         self._send('150 Opening data connection.')
+        import tempfile
+        t = tempfile.NamedTemporaryFile()
+        sz = 0
         self.start_datasock()
         while True:
             data = self.datasock.recv(1024)
             if not data:
                 break
             else:
-                print repr(data)
+                sz += len(data)
+                t.write(data)
         self.stop_datasock()
-        self._send('226 Transfer complete.')
+        t.flush()
+        t.seek(0)
+        success = upload(user=self._user, file_name=cmd[5:].strip(), file_obj=t)
+        t.close()
+        self._status = ('error', 'no luck')
+        if success:
+            self._send('226 Transfer complete.')
+        else:
+            self._send('500 Transfer failed.')
 
 
 class FTPserver(threading.Thread):
