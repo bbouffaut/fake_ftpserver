@@ -5,46 +5,19 @@ import threading
 import time
 import traceback
 import requests
-
+import logging
 
 def make_path(*parts):
     path = os.path.join(*parts)
-    if not os.path.exists(path):
-        os.mkdir(path)
     return path
-
-
-API_HOST = 'http://0.0.0.0:8000'
-
-
-class Client(object):
-
-    def __init__(self):
-        self.session = requests.Session()
-        self.username = self.remote_session_id = None
-
-    def csrftoken(self, refresh=True):
-        if refresh:
-            self.session.get(API_HOST + '/account/login')
-        return self.session.cookies['csrftoken']
-
-    def login(self, username, password, ip):
-        r = self.session.post(API_HOST + '/account/login', allow_redirects=False, data={
-            'username': username, 'password': password, 'csrfmiddlewaretoken': self.csrftoken()})
-        self.remote_session_id = r.cookies.get('sessionid')
-        self.username = username
-        return bool(self.remote_session_id)
-
-    def upload(self, file_name, file_obj):
-        r = self.session.post(API_HOST + '/api/ftp', data={'csrfmiddlewaretoken': self.csrftoken()},
-                              files={file_name: file_obj})
-        return r.content == 'OK'
 
 
 class BaseFtpThread(threading.Thread):
     GUEST = 'guest'
 
     def __init__(self, (conn, addr), ftp_server):
+        #self.logger = logging.getLogger(__name__)
+        #self.logger.setLevel(logging.INFO)
         self.allowed_commands = ''
         self.conn = conn
         self.addr = addr
@@ -72,7 +45,7 @@ class BaseFtpThread(threading.Thread):
     def _log(self, s, *args):
         import datetime
         t = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        print '[%s %s:%s] %s' % (t, self.addr[0], self.addr[1], s % args)
+        print('[%s %s:%s] %s' % (t, self.addr[0], self.addr[1], s % args))
 
     def _command_allowed(self, cmd):
         return True
@@ -161,34 +134,30 @@ class FtpThread(BaseFtpThread):
         if cmd[5] in ['I', 'A']:
             self.mode = cmd[5]
             if self.mode == 'I':
-                self._send('200 Binary mode.')
+                self._send('200 Type set to: Binary.')
             else:
-                self._send('200 ASCII mode.')
+                self._send('200 Type set to: ASCII.')
         else:
             self._send('500 Sorry, only binary and ASCII type supported.')
 
     def CDUP(self, cmd):
-        if not os.path.samefile(self.cwd, self.home_dir):
-            self.cwd = os.path.abspath(os.path.join(self.cwd, '..'))
         self._send('200 OK.')
 
     def PWD(self, cmd):
-        cwd = os.path.relpath(self.cwd, self.home_dir)
-        if cwd == '.':
-            cwd = '/'
-        else:
-            cwd = '/' + cwd
-        self._send('257 "%s"' % cwd)
+        self._send('257 "%s"' % self.cwd)
 
     def CWD(self, cmd):
         chwd = cmd[4:-2]
         if chwd == '/':
             self.cwd = self.home_dir
         elif chwd[0] == '/':
-            self.cwd = os.path.join(self.home_dir, chwd[1:])
+            self.cwd = chwd
+        elif chwd == '..':
+            head, tail = os.path.split(self.cwd)
+            self.cwd = head
         else:
-            self.cwd = os.path.join(self.cwd, chwd)
-        self._send('250 OK.')
+            self.cwd = os.path.join(self.cwd, chwd[0:])
+        self._send('250 "%s" is the current directory.' % (self.cwd))
 
     def PORT(self, cmd):
         if self.pasv_mode:
@@ -215,96 +184,50 @@ class FtpThread(BaseFtpThread):
 
     def LIST(self, cmd):
         self._send('150 Here comes the directory listing.')
-        print 'list:', self.cwd
-
-        def _list_item(fn):
-            st = os.stat(fn)
-            fullmode = 'rwxrwxrwx'
-            mode = ''
-            for i in range(9):
-                mode += ((st.st_mode >> (8 - i)) & 1) and fullmode[i] or '-'
-            d = os.path.isdir(fn) and 'd' or '-'
-            ftime = time.strftime(' %b %d %H:%M ', time.gmtime(st.st_mtime))
-            return d + mode + ' 1 user group ' + str(st.st_size) + \
-                ftime + os.path.basename(fn)
+        print('list:', self.cwd)
 
         self.start_datasock()
-        for t in os.listdir(self.cwd):
-            k = _list_item(os.path.join(self.cwd, t))
-            self._send(k, channel='data')
         self.stop_datasock()
         self._send('226 Directory send OK.')
 
     def MKD(self, cmd):
-        dn = os.path.join(self.cwd, cmd[4:-2])
-        os.mkdir(dn)
-        self._send('257 Directory created.')
- 
+        self._send('550 File exists.')
+
     def RMD(self, cmd):
-        dn = os.path.join(self.cwd, cmd[4:-2])
-        if self.server.can_delete:
-            os.rmdir(dn)
-            self._send('250 Directory deleted.')
-        else:
-            self._send('450 Not allowed.')
- 
+        self._send('250 Directory deleted.')
+
     def DELE(self, cmd):
-        fn = os.path.join(self.cwd, cmd[5:-2])
-        if self.server.can_delete:
-            os.remove(fn)
-            self._send('250 File deleted.')
-        else:
-            self._send('450 Not allowed.')
- 
+        self._send('250 File deleted.')
+
     def RNFR(self, cmd):
-        self.rnfn = os.path.join(self.cwd, cmd[5:-2])
         self._send('350 Ready.')
- 
+
     def RNTO(self, cmd):
-        fn = os.path.join(self.cwd, cmd[5:-2])
-        os.rename(self.rnfn, fn)
         self._send('250 File renamed.')
- 
+
     def REST(self, cmd):
         self.pos = int(cmd[5:-2])
         self.rest = True
-        self._send('250 File position reseted.')
- 
+        self._send('350 Restarting at position %s.' % (self.pos))
+
     def RETR(self, cmd):
-        fn = os.path.join(self.cwd, cmd[5:-2])
-        self._log('Download: ' + fn)
-        if self.mode == 'I':
-            fi = open(fn, 'rb')
-        else:
-            fi = open(fn, 'r')
         self._send('150 Opening data connection.')
-        if self.rest:
-            fi.seek(self.pos)
-            self.rest = False
-        data = fi.read(1024)
         self.start_datasock()
-        while data:
-            self.datasock.send(data)
-            data = fi.read(1024)
-        fi.close()
         self.stop_datasock()
         self._send('226 Transfer complete.')
- 
+
     def STOR(self, cmd):
         fn = os.path.join(self.cwd, cmd[5:-2])
         self._log('Upload: ' + fn)
-        if self.mode == 'I':
-            fo = open(fn, 'wb')
-        else:
-            fo = open(fn, 'w')
+        #fo = open(fn, 'wb')
         self._send('150 Opening data connection.')
         self.start_datasock()
         while True:
             data = self.datasock.recv(1024)
             if not data:
                 break
-            fo.write(data)
-        fo.close()
+        #    fo.write(data)
+        #fo.close()
         self.stop_datasock()
         self._send('226 Transfer complete.')
 
@@ -312,82 +235,9 @@ class FtpThread(BaseFtpThread):
         self._send('213 0')
 
 
-class LimitedFtpThread(FtpThread):
-    _status = None
-    _client = None
-
-    def _command_allowed(self, cmd):
-        return cmd not in 'cdup mkd rmd dele rnfr rnto'.upper().split()
-
-    def PASS(self, cmd):
-        self._client = Client()
-        self._authorized = self._client.login(username=self._user, password=cmd[5:].strip(), ip=self.addr[0])
-        if self._authorized:
-            self._send('230 OK.')
-        else:
-            self._send('530 Incorrect.')
-
-    def PWD(self, cmd):
-        self._send('257 "/"')
-
-    def LIST(self, cmd):
-        self._send('150 You can only see a status file after upload.')
-        self.start_datasock()
-        #self._send('drw-r--r-- 1 %s ftp 111 Dec 02 22:16 .' % self._user, channel='data')
-        # if self._status:
-        #     self._send('-rw-r--r-- 1 %s ftp 111 Jan 01 00:00 %s.txt' % (self._user, self._status[0]), channel='data')
-        self.stop_datasock()
-        self._send('226 Directory send OK.')
-
-    def SIZE(self, cmd):
-        if cmd[5:].strip() in ['/success.txt', '/error.txt']:
-            self._send('213 2048')
-        else:
-            self._send('550 File unavailable.')
-
-    def CWD(self, cmd):
-        if cmd[4:].strip() != '/':
-            self._send('550 File unavailable.')
-        else:
-            self._send('250 OK.')
-
-    def RETR(self, cmd):
-        self._send('150 Opening data connection.')
-        if self.rest:
-            raise NotImplementedError
-        self.start_datasock()
-        self._send('hello', channel='data')
-        self.stop_datasock()
-        self._send('226 Transfer complete.')
-
-    def STOR(self, cmd):
-        self._send('150 Opening data connection.')
-        import tempfile
-        t = tempfile.NamedTemporaryFile()
-        sz = 0
-        self.start_datasock()
-        while True:
-            data = self.datasock.recv(1024)
-            if not data:
-                break
-            else:
-                sz += len(data)
-                t.write(data)
-        self.stop_datasock()
-        t.flush()
-        t.seek(0)
-        success = self._client.upload(file_name=cmd[5:].strip(), file_obj=t)
-        t.close()
-        self._status = ('error', 'no luck')
-        if success:
-            self._send('226 SUCCESS.')
-        else:
-            self._send('226 ERROR.')
-
-
 class FTPserver(threading.Thread):
 
-    def __init__(self, ip='127.0.0.1', port=21, path='/tmp/ftp', can_delete=False):
+    def __init__(self, ip='127.0.0.1', port=21, path='/home', can_delete=False):
         self.ftp_ip = ip
         self.ftp_port = port
         self.ftp_path = make_path(path)
@@ -395,21 +245,21 @@ class FTPserver(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind((ip, port))
         threading.Thread.__init__(self)
- 
+
     def run(self):
         self.sock.listen(5)
         while True:
-            th = LimitedFtpThread(self.sock.accept(), ftp_server=self)
+            th = FtpThread(self.sock.accept(), ftp_server=self)
             th.daemon = True
             th.start()
- 
+
     def stop(self):
         self.sock.close()
 
 
 if __name__ == '__main__':
     import sys
-    server_ip = '127.0.0.1'
+    server_ip = '10.10.0.129'
     server_port = 2121
     if len(sys.argv) > 1:
         if '.' in sys.argv[1]:
@@ -427,4 +277,4 @@ if __name__ == '__main__':
         pass
     finally:
         ftp.stop()
-        print 'Bye.'
+        print('Bye.')
