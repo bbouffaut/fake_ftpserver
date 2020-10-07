@@ -22,7 +22,7 @@ jobs:
     - uses: ponicode/docstrings-action@master
       with:
         repo_path: ./
-        all_repo: False
+        all_repo: True
       # Creates pull request with all changes in file
     - name: Create Pull Request 
       uses: peter-evans/create-pull-request@v2 
